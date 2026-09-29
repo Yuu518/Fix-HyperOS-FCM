@@ -4,9 +4,11 @@ import static org.junit.Assert.assertEquals;
 
 import android.app.NotificationChannel;
 
+import com.android.server.notification.NotificationManagerService;
 import com.android.server.notification.NotificationRecord;
 
 import java.lang.reflect.Method;
+import java.util.List;
 import org.junit.Test;
 
 public final class HookContractTest {
@@ -44,6 +46,28 @@ public final class HookContractTest {
     @Test(expected = NoSuchMethodException.class)
     public void rejectsRecordWithoutCopyRankingMethod() throws Exception {
         HookContract.findCopyRankingMethod(FakeGreezeManager.class);
+    }
+
+    @Test
+    public void resolvesOnlyVoidCancelAllOverloads() throws Exception {
+        List<Method> methods = HookContract.findCancelAllMethods(NotificationManagerService.class);
+
+        assertEquals(1, methods.size());
+        assertEquals("cancelAllNotificationsInt", methods.get(0).getName());
+        assertEquals(void.class, methods.get(0).getReturnType());
+    }
+
+    @Test(expected = NoSuchMethodException.class)
+    public void rejectsServiceWithoutCancelAllMethod() throws Exception {
+        HookContract.findCancelAllMethods(FakeGreezeManager.class);
+    }
+
+    @Test
+    public void resolvesNotificationServiceStartMethod() throws Exception {
+        Method method = HookContract.findServiceStartMethod(NotificationManagerService.class);
+
+        assertEquals("onStart", method.getName());
+        assertEquals(0, method.getParameterCount());
     }
 
     private static final class FakeGreezeManager {

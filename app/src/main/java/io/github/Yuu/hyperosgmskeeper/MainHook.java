@@ -6,6 +6,7 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
+import io.github.libxposed.api.XposedInterface.Chain;
 import io.github.libxposed.api.XposedInterface.HookHandle;
 import io.github.libxposed.api.XposedInterface.Hooker;
 import io.github.libxposed.api.XposedModule;
@@ -22,9 +23,13 @@ public final class MainHook extends XposedModule {
     private static final String TAG = "HyperOSGmsKeeper";
     static final String GMS_HOOK_ID = "block-gms-limit";
     static final String CHANNEL_HOOK_ID = "keep-alerting-channel";
+    static final String STOP_CANCEL_HOOK_ID = "keep-notifications-on-stop";
+    static final String STOP_START_HOOK_ID = "keep-notifications-on-stop-attach";
+    static final String STOP_RECEIVER_HOOK_ID = "keep-notifications-on-stop-receiver";
 
     private volatile ClassLoader systemServerClassLoader;
     private volatile NotificationChannelKeeper channelKeeper;
+    private final ThreadLocal<String> restartingPackage = new ThreadLocal<>();
 
     private final Hooker blocker = chain -> {
         log(Log.INFO, TAG, "blocked GreezeManagerService.triggerGMSLimitAction()");
@@ -47,16 +52,56 @@ public final class MainHook extends XposedModule {
         return result;
     };
 
+    private final Hooker cancelAllHooker = chain -> {
+        String packageName = restartingPackage.get();
+        if (packageName == null) {
+            return chain.proceed();
+        }
+        log(Log.INFO, TAG, "kept notifications of force-stopped " + packageName);
+        return null;
+    };
+
+    private final Hooker packageRestartHooker = chain -> {
+        String packageName = ForceStopNotificationKeeper.restartedPackage(chain.getArg(1));
+        return packageName == null ? chain.proceed() : proceedAsPackageRestart(packageName, chain);
+    };
+
+    private final Hooker serviceStartHooker = chain -> {
+        Object result = chain.proceed();
+        try {
+            Class<?> serviceClass = chain.getExecutable().getDeclaringClass();
+            for (HookTarget target : resolveReceiverTargets(serviceClass, chain.getThisObject())) {
+                install(target);
+            }
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "failed to attach hook " + STOP_RECEIVER_HOOK_ID, error);
+        }
+        return result;
+    };
+
+    Object proceedAsPackageRestart(String packageName, Chain chain) throws Throwable {
+        restartingPackage.set(packageName);
+        try {
+            return chain.proceed();
+        } finally {
+            restartingPackage.remove();
+        }
+    }
+
     @Override
     public void onSystemServerStarting(SystemServerStartingParam param) {
         systemServerClassLoader = param.getClassLoader();
         for (HookTarget target : resolveTargets(systemServerClassLoader)) {
-            try {
-                hook(target.method).setId(target.id).intercept(target.hooker);
-                log(Log.INFO, TAG, target.installedMessage);
-            } catch (Throwable error) {
-                log(Log.ERROR, TAG, "failed to install hook " + target.id, error);
-            }
+            install(target);
+        }
+    }
+
+    private void install(HookTarget target) {
+        try {
+            hook(target.method).setId(target.id).intercept(target.hooker);
+            log(Log.INFO, TAG, target.installedMessage);
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "failed to install hook " + target.id, error);
         }
     }
 
@@ -84,6 +129,10 @@ public final class MainHook extends XposedModule {
         List<HookTarget> installed = new ArrayList<>();
         for (HookHandle handle : param.getOldHookHandles()) {
             HookTarget target = findTarget(pending, handle);
+            if (target == null && STOP_RECEIVER_HOOK_ID.equals(handle.getId())
+                    && handle.getExecutable() instanceof Method) {
+                target = receiverTarget((Method) handle.getExecutable());
+            }
             if (target != null) {
                 try {
                     handle.replaceHook(target.hooker);
@@ -134,7 +183,47 @@ public final class MainHook extends XposedModule {
         } catch (Throwable error) {
             log(Log.ERROR, TAG, "failed to resolve hook " + CHANNEL_HOOK_ID, error);
         }
+        resolveForceStopTargets(classLoader, targets);
         return targets;
+    }
+
+    private void resolveForceStopTargets(ClassLoader classLoader, List<HookTarget> targets) {
+        Class<?> serviceClass;
+        try {
+            serviceClass = Class.forName(HookContract.NOTIFICATION_SERVICE_CLASS, false, classLoader);
+            Method serviceStart = HookContract.findServiceStartMethod(serviceClass);
+            for (Method cancelAll : HookContract.findCancelAllMethods(serviceClass)) {
+                targets.add(new HookTarget(STOP_CANCEL_HOOK_ID, cancelAll, cancelAllHooker,
+                        "force-stop notification hook installed on " + cancelAll));
+            }
+            targets.add(new HookTarget(STOP_START_HOOK_ID, serviceStart, serviceStartHooker,
+                    "force-stop notification hook waiting for NotificationManagerService"));
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "failed to resolve hook " + STOP_CANCEL_HOOK_ID, error);
+            return;
+        }
+        try {
+            Object service = ForceStopNotificationKeeper.findRunningService(serviceClass);
+            if (service != null) {
+                targets.addAll(resolveReceiverTargets(serviceClass, service));
+            }
+        } catch (Throwable error) {
+            log(Log.WARN, TAG, "failed to locate running NotificationManagerService", error);
+        }
+    }
+
+    private List<HookTarget> resolveReceiverTargets(Class<?> serviceClass, Object service)
+            throws IllegalAccessException {
+        List<HookTarget> targets = new ArrayList<>();
+        for (Method method : ForceStopNotificationKeeper.findReceiverMethods(serviceClass, service)) {
+            targets.add(receiverTarget(method));
+        }
+        return targets;
+    }
+
+    private HookTarget receiverTarget(Method method) {
+        return new HookTarget(STOP_RECEIVER_HOOK_ID, method, packageRestartHooker,
+                "force-stop notification hook attached to " + method.getDeclaringClass().getName());
     }
 
     private static HookTarget findTarget(List<HookTarget> targets, HookHandle handle) {

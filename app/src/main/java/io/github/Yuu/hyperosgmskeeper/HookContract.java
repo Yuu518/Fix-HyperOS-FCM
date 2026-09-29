@@ -1,6 +1,8 @@
 package io.github.Yuu.hyperosgmskeeper;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 
 /** The deliberately narrow contract between this module and HyperOS. */
 public final class HookContract {
@@ -13,7 +15,34 @@ public final class HookContract {
     static final String COPY_RANKING_METHOD = "copyRankingInformation";
     static final String UPDATE_SYSTEM_CHANNEL_METHOD = "updateSystemNotificationChannel";
 
+    static final String NOTIFICATION_SERVICE_CLASS =
+            "com.android.server.notification.NotificationManagerService";
+    static final String NOTIFICATION_INTERNAL_CLASS =
+            "com.android.server.notification.NotificationManagerInternal";
+    static final String LOCAL_SERVICES_CLASS = "com.android.server.LocalServices";
+    static final String SERVICE_START_METHOD = "onStart";
+    static final String CANCEL_ALL_METHOD = "cancelAllNotificationsInt";
+    static final String RECEIVE_METHOD = "onReceive";
+
     private HookContract() {
+    }
+
+    static Method findServiceStartMethod(Class<?> serviceClass) throws NoSuchMethodException {
+        return findVoidMethod(serviceClass, SERVICE_START_METHOD);
+    }
+
+    static List<Method> findCancelAllMethods(Class<?> serviceClass) throws NoSuchMethodException {
+        List<Method> methods = new ArrayList<>();
+        for (Method method : serviceClass.getDeclaredMethods()) {
+            if (method.getName().equals(CANCEL_ALL_METHOD) && method.getReturnType() == void.class) {
+                methods.add(method);
+            }
+        }
+        if (methods.isEmpty()) {
+            throw new NoSuchMethodException(serviceClass.getName() + "." + CANCEL_ALL_METHOD
+                    + "() returning void");
+        }
+        return methods;
     }
 
     static Method findLimitMethod(Class<?> serviceClass) throws NoSuchMethodException {

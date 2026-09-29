@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "HyperOS GMS Keeper"
+rootProject.name = "Fix-HyperOS-FCM"
 include(":app")

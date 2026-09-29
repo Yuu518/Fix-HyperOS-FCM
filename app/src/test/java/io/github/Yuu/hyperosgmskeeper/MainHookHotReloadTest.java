@@ -10,6 +10,7 @@ import static org.junit.Assert.assertTrue;
 
 import android.os.Bundle;
 
+import com.android.server.notification.NotificationManagerService;
 import com.android.server.notification.NotificationRecord;
 import com.miui.server.greeze.GreezeManagerService;
 
@@ -32,17 +33,83 @@ public final class MainHookHotReloadTest {
     private static final ClassLoader SYSTEM_SERVER = GreezeManagerService.class.getClassLoader();
 
     @Test
-    public void installsBothHooksOnSystemServerStart() throws Throwable {
+    public void installsAllHooksOnSystemServerStart() throws Throwable {
         FakeFramework framework = new FakeFramework();
         MainHook module = framework.attach(new MainHook());
 
         module.onSystemServerStarting(() -> SYSTEM_SERVER);
 
-        assertEquals(2, framework.installed.size());
+        assertEquals(4, framework.installed.size());
         FakeHandle gmsHook = framework.find(MainHook.GMS_HOOK_ID);
         assertEquals(limitMethod(), gmsHook.executable);
         assertNull(gmsHook.hooker.intercept(null));
         assertEquals(copyRankingMethod(), framework.find(MainHook.CHANNEL_HOOK_ID).executable);
+        assertEquals(cancelAllMethod(), framework.find(MainHook.STOP_CANCEL_HOOK_ID).executable);
+        assertEquals(serviceStartMethod(), framework.find(MainHook.STOP_START_HOOK_ID).executable);
+    }
+
+    @Test
+    public void cancelAllHookProceedsOutsidePackageRestart() throws Throwable {
+        FakeFramework framework = new FakeFramework();
+        MainHook module = framework.attach(new MainHook());
+        module.onSystemServerStarting(() -> SYSTEM_SERVER);
+        FakeChain chain = new FakeChain(new NotificationManagerService(), null);
+
+        Object result = framework.find(MainHook.STOP_CANCEL_HOOK_ID).hooker.intercept(chain.proxy());
+
+        assertTrue(chain.proceeded);
+        assertSame(FakeChain.PROCEED_RESULT, result);
+    }
+
+    @Test
+    public void cancelAllHookSkipsDuringPackageRestart() throws Throwable {
+        FakeFramework framework = new FakeFramework();
+        MainHook module = framework.attach(new MainHook());
+        module.onSystemServerStarting(() -> SYSTEM_SERVER);
+        Hooker cancelAll = framework.find(MainHook.STOP_CANCEL_HOOK_ID).hooker;
+        FakeChain cancelChain = new FakeChain(new NotificationManagerService(), null);
+        FakeChain receiverChain = new FakeChain(null, null);
+        receiverChain.onProceed = () -> cancelAll.intercept(cancelChain.proxy());
+
+        module.proceedAsPackageRestart("org.telegram.messenger", receiverChain.proxy());
+
+        assertTrue(receiverChain.proceeded);
+        assertFalse(cancelChain.proceeded);
+
+        cancelAll.intercept(cancelChain.proxy());
+        assertTrue(cancelChain.proceeded);
+    }
+
+    @Test
+    public void serviceStartHookAlwaysProceeds() throws Throwable {
+        FakeFramework framework = new FakeFramework();
+        MainHook module = framework.attach(new MainHook());
+        module.onSystemServerStarting(() -> SYSTEM_SERVER);
+        FakeChain chain = new FakeChain(new NotificationManagerService(), null);
+        chain.executable = serviceStartMethod();
+
+        Object result = framework.find(MainHook.STOP_START_HOOK_ID).hooker.intercept(chain.proxy());
+
+        assertTrue(chain.proceeded);
+        assertSame(FakeChain.PROCEED_RESULT, result);
+        assertEquals(4, framework.installed.size());
+    }
+
+    @Test
+    public void hotReloadKeepsReceiverHooksFromOldGeneration() throws Throwable {
+        FakeFramework framework = new FakeFramework();
+        MainHook module = framework.attach(new MainHook());
+        FakeHandle oldReceiverHook = new FakeHandle(
+                quickFreezeMethod(), MainHook.STOP_RECEIVER_HOOK_ID, chain -> null);
+
+        module.onHotReloaded(new Reloaded(SYSTEM_SERVER, List.of(oldReceiverHook)));
+
+        assertFalse(oldReceiverHook.unhooked);
+        assertNotNull(oldReceiverHook.replacement);
+        FakeChain chain = new FakeChain(null, new Object());
+        assertSame(FakeChain.PROCEED_RESULT,
+                oldReceiverHook.replacement.hooker.intercept(chain.proxy()));
+        assertTrue(chain.proceeded);
     }
 
     @Test
@@ -75,6 +142,8 @@ public final class MainHookHotReloadTest {
         oldModule.onSystemServerStarting(() -> SYSTEM_SERVER);
         FakeHandle oldGmsHook = oldFramework.find(MainHook.GMS_HOOK_ID);
         FakeHandle oldChannelHook = oldFramework.find(MainHook.CHANNEL_HOOK_ID);
+        FakeHandle oldCancelHook = oldFramework.find(MainHook.STOP_CANCEL_HOOK_ID);
+        FakeHandle oldStartHook = oldFramework.find(MainHook.STOP_START_HOOK_ID);
         FakeHandle strayHook = new FakeHandle(quickFreezeMethod(), null, chain -> null);
         Reloading reloading = new Reloading();
         oldModule.onHotReloading(reloading);
@@ -82,7 +151,7 @@ public final class MainHookHotReloadTest {
         FakeFramework newFramework = new FakeFramework();
         MainHook newModule = newFramework.attach(new MainHook());
         newModule.onHotReloaded(new Reloaded(reloading.savedState,
-                List.of(oldGmsHook, oldChannelHook, strayHook)));
+                List.of(oldGmsHook, oldChannelHook, oldCancelHook, oldStartHook, strayHook)));
 
         assertNotNull(oldGmsHook.replacement);
         assertNotSame(oldGmsHook.hooker, oldGmsHook.replacement.hooker);
@@ -91,6 +160,8 @@ public final class MainHookHotReloadTest {
         assertNotNull(oldChannelHook.replacement);
         assertNotSame(oldChannelHook.hooker, oldChannelHook.replacement.hooker);
         assertFalse(oldChannelHook.unhooked);
+        assertNotNull(oldCancelHook.replacement);
+        assertNotNull(oldStartHook.replacement);
         assertTrue(strayHook.unhooked);
         assertTrue(newFramework.installed.isEmpty());
     }
@@ -102,9 +173,11 @@ public final class MainHookHotReloadTest {
 
         module.onHotReloaded(new Reloaded(SYSTEM_SERVER, List.of()));
 
-        assertEquals(2, framework.installed.size());
+        assertEquals(4, framework.installed.size());
         assertEquals(limitMethod(), framework.find(MainHook.GMS_HOOK_ID).executable);
         assertEquals(copyRankingMethod(), framework.find(MainHook.CHANNEL_HOOK_ID).executable);
+        assertEquals(cancelAllMethod(), framework.find(MainHook.STOP_CANCEL_HOOK_ID).executable);
+        assertEquals(serviceStartMethod(), framework.find(MainHook.STOP_START_HOOK_ID).executable);
     }
 
     @Test
@@ -116,8 +189,10 @@ public final class MainHookHotReloadTest {
         module.onHotReloaded(new Reloaded(SYSTEM_SERVER, List.of(oldGmsHook)));
 
         assertNotNull(oldGmsHook.replacement);
-        assertEquals(1, framework.installed.size());
-        assertEquals(copyRankingMethod(), framework.installed.get(0).executable);
+        assertEquals(3, framework.installed.size());
+        assertEquals(copyRankingMethod(), framework.find(MainHook.CHANNEL_HOOK_ID).executable);
+        assertEquals(cancelAllMethod(), framework.find(MainHook.STOP_CANCEL_HOOK_ID).executable);
+        assertEquals(serviceStartMethod(), framework.find(MainHook.STOP_START_HOOK_ID).executable);
     }
 
     @Test
@@ -143,7 +218,7 @@ public final class MainHookHotReloadTest {
         module.onHotReloaded(new Reloaded(SYSTEM_SERVER, List.of(oldHook)));
 
         assertTrue(oldHook.unhooked);
-        assertEquals(2, framework.installed.size());
+        assertEquals(4, framework.installed.size());
         assertEquals(limitMethod(), framework.find(MainHook.GMS_HOOK_ID).executable);
     }
 
@@ -154,6 +229,16 @@ public final class MainHookHotReloadTest {
     private static Method copyRankingMethod() throws NoSuchMethodException {
         return NotificationRecord.class.getDeclaredMethod(
                 "copyRankingInformation", NotificationRecord.class);
+    }
+
+    private static Method cancelAllMethod() throws NoSuchMethodException {
+        return NotificationManagerService.class.getDeclaredMethod("cancelAllNotificationsInt",
+                int.class, int.class, String.class, String.class, int.class, int.class,
+                int.class, int.class);
+    }
+
+    private static Method serviceStartMethod() throws NoSuchMethodException {
+        return NotificationManagerService.class.getDeclaredMethod("onStart");
     }
 
     private static Method quickFreezeMethod() throws NoSuchMethodException {
@@ -265,11 +350,17 @@ public final class MainHookHotReloadTest {
         }
     }
 
+    private interface ThrowingAction {
+        void run() throws Throwable;
+    }
+
     private static final class FakeChain implements InvocationHandler {
         static final Object PROCEED_RESULT = new Object();
 
         private final Object thisObject;
         private final Object previous;
+        Executable executable;
+        ThrowingAction onProceed;
         boolean proceeded;
 
         FakeChain(Object thisObject, Object previous) {
@@ -285,13 +376,18 @@ public final class MainHookHotReloadTest {
         }
 
         @Override
-        public Object invoke(Object proxy, Method method, Object[] args) {
+        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
             switch (method.getName()) {
                 case "proceed":
                     proceeded = true;
+                    if (onProceed != null) {
+                        onProceed.run();
+                    }
                     return PROCEED_RESULT;
                 case "getThisObject":
                     return thisObject;
+                case "getExecutable":
+                    return executable;
                 case "getArg":
                     return previous;
                 default:

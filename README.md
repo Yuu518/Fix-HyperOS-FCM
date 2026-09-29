@@ -1,4 +1,4 @@
-# HyperOS GMS Keeper
+# Fix-HyperOS-FCM
 
 An LSPosed module that runs only in Android's `system_server` process. It prevents
 HyperOS Aurogon/Greeze from freezing the entire GMS UID after the screen has been
@@ -58,12 +58,42 @@ The hook leaves the notification unchanged when:
 - the new channel is blocked, or
 - the notification is ongoing, a foreground service, or a user-initiated job.
 
+## Notifications Cleared When an App Is Closed
+
+Swiping an app away in HyperOS recents, or cleaning it up from the Security app,
+force-stops most third-party apps. `ActivityManagerService` then sends
+`ACTION_PACKAGE_RESTARTED`, and the package receiver in
+`NotificationManagerService` removes every notification the app has posted
+through
+
+```text
+com.android.server.notification.NotificationManagerService.cancelAllNotificationsInt(...): void
+```
+
+The module hooks `NotificationManagerService.onStart()` to find the service's
+`BroadcastReceiver` fields and hook their `onReceive`. While one of them handles
+`ACTION_PACKAGE_RESTARTED`, calls to `cancelAllNotificationsInt` on that thread
+return without removing anything. The rest of the receiver still runs, so
+notification listeners and assistants in the stopped package are rebound as
+usual. Package removal, updates, suspension, and disabling still clear
+notifications.
+
+This also applies to *Force stop* in Settings, because it sends the same
+broadcast. Foreground service notifications are still removed, because
+`ActivityManagerService` cancels them separately when it stops the service.
+
+On Android 15 and later, force-stopping an app can also cancel its
+`PendingIntent`s. If it does, tapping a kept notification or using its actions
+may do nothing until the app runs again. The notification itself stays visible and can
+be dismissed.
+
 ## Installation
 
-1. Install the generated APK. With a device connected, you can run:
+1. Install the signed release APK, either from the `Fix-HyperOS-FCM-release`
+   Actions artifact or from a local build. With a device connected, you can run:
 
    ```powershell
-   adb install -r .\app\build\outputs\apk\debug\HyperOS-GMS-Keeper-1.3.0-debug.apk
+   adb install -r .\app\build\outputs\apk\release\Fix-HyperOS-FCM-0.4.0-release.apk
    ```
 
 2. Make sure your LSPosed implementation supports libxposed API 102, then enable
@@ -93,6 +123,9 @@ First, confirm these messages appear in the LSPosed log:
 ```text
 HyperOSGmsKeeper: hook installed in system_server; scope is limited to system
 HyperOSGmsKeeper: notification channel hook installed in system_server
+HyperOSGmsKeeper: force-stop notification hook installed on ...cancelAllNotificationsInt(...)
+HyperOSGmsKeeper: force-stop notification hook waiting for NotificationManagerService
+HyperOSGmsKeeper: force-stop notification hook attached to com.android.server.notification.NotificationManagerService$...
 ```
 
 After a hot reload, the new version logs this for each hook instead:
@@ -100,7 +133,17 @@ After a hot reload, the new version logs this for each hook instead:
 ```text
 HyperOSGmsKeeper: hook block-gms-limit reinstalled in system_server after hot reload
 HyperOSGmsKeeper: hook keep-alerting-channel reinstalled in system_server after hot reload
+HyperOSGmsKeeper: hook keep-notifications-on-stop reinstalled in system_server after hot reload
 ```
+
+When an app is swiped away or force-stopped, the module logs its package name:
+
+```text
+HyperOSGmsKeeper: kept notifications of force-stopped org.telegram.messenger
+```
+
+If notifications still disappear without this line, check which reason removed
+them with `adb logcat -b events -s notification_cancel_all notification_canceled`.
 
 When an app tries to move a posted notification into a silent channel, the
 module logs the notification key and both channel IDs:
@@ -124,22 +167,27 @@ handled separately.
 
 ## Building
 
-JDK 17 or 21 and Android SDK Platform 34 are required. JDK 25 is currently
+JDK 17 or 21 and Android SDK Platform 35 are required. JDK 25 is currently
 incompatible with the Gradle/Android Gradle Plugin versions used by this project.
 
 ```powershell
-.\gradlew.bat testDebugUnitTest assembleDebug
+.\gradlew.bat testReleaseUnitTest assembleRelease
 ```
 
-The debug APK is written to `app/build/outputs/apk/debug/`.
+To sign the APK during the build, set `RELEASE_STORE_FILE`,
+`RELEASE_STORE_PASSWORD`, `RELEASE_KEY_ALIAS`, and `RELEASE_KEY_PASSWORD` in
+`~/.gradle/gradle.properties` or pass them with `-P`. The signed APK is written
+to `app/build/outputs/apk/release/`. Without these properties, Gradle writes
+`Fix-HyperOS-FCM-<version>-release-unsigned.apk`, which must be signed with
+`apksigner` before it can be installed.
 
 ### GitHub Actions Release Signing
 
 The Actions workflow builds a non-debuggable, signed release APK when all of
 the following secrets are available. Without them (for example on forks and
-pull requests from forks), it runs the unit tests and uploads a debug APK
-instead. Add the secrets under `Settings -> Secrets and variables -> Actions`
-in the repository:
+pull requests from forks), it only runs the unit tests and uploads no APK. Add
+the secrets under `Settings -> Secrets and variables -> Actions` in the
+repository:
 
 - `RELEASE_KEYSTORE_BASE64`: Base64-encoded signing keystore
 - `RELEASE_STORE_PASSWORD`: Keystore password

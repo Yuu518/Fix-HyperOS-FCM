@@ -35,7 +35,7 @@ jobs:
 
       - name: Install Android SDK packages
         run: |
-          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;35.0.0"
+          "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Grant execute permission to Gradle wrapper
         run: chmod +x ./gradlew
@@ -51,24 +51,15 @@ jobs:
           enabled=true
           for variable in RELEASE_KEYSTORE_BASE64 RELEASE_STORE_PASSWORD RELEASE_KEY_ALIAS RELEASE_KEY_PASSWORD; do
             if [ -z "${!variable}" ]; then
-              echo "::warning::Missing GitHub Actions secret: ${variable}; building debug APK instead"
+              echo "::warning::Missing GitHub Actions secret: ${variable}; running unit tests only"
               enabled=false
             fi
           done
           echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
 
-      - name: Run unit tests and build debug APK
+      - name: Run unit tests
         if: steps.signing.outputs.enabled != 'true'
-        run: ./gradlew testDebugUnitTest assembleDebug --stacktrace
-
-      - name: Upload debug APK
-        if: steps.signing.outputs.enabled != 'true'
-        uses: actions/upload-artifact@v7
-        with:
-          name: HyperOS-GMS-Keeper-debug
-          path: app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
-          retention-days: 14
+        run: ./gradlew testReleaseUnitTest --stacktrace
 
       - name: Decode release keystore
         if: steps.signing.outputs.enabled == 'true'
@@ -94,7 +85,7 @@ jobs:
         if: steps.signing.outputs.enabled == 'true'
         uses: actions/upload-artifact@v7
         with:
-          name: HyperOS-GMS-Keeper-release
+          name: Fix-HyperOS-FCM-release
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 14

@@ -15,14 +15,14 @@ val hasReleaseSigning = listOf(
 
 android {
     namespace = "io.github.Yuu518.hyperosgmskeeper"
-    compileSdk = 34
+    compileSdk = 35
 
     defaultConfig {
         applicationId = "io.github.Yuu518.hyperosgmskeeper"
         minSdk = 28
-        targetSdk = 34
-        versionCode = 3
-        versionName = 0.3.0
+        targetSdk = 35
+        versionCode = 4
+        versionName = "0.4.0"
     }
 
     signingConfigs {
@@ -64,7 +64,7 @@ android {
 }
 
 base {
-    archivesName.set("HyperOS-GMS-Keeper-$appVersionName")
+    archivesName.set("Fix-HyperOS-FCM-${android.defaultConfig.versionName}")
 }
 
 dependencies {
