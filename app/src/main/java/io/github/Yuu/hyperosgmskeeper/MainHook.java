@@ -3,6 +3,8 @@ package io.github.Yuu.hyperosgmskeeper;
 import android.util.Log;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 
 import io.github.libxposed.api.XposedInterface.HookHandle;
 import io.github.libxposed.api.XposedInterface.Hooker;
@@ -18,27 +20,43 @@ import io.github.libxposed.api.XposedModule;
  */
 public final class MainHook extends XposedModule {
     private static final String TAG = "HyperOSGmsKeeper";
-    private static final String HOOK_ID = "block-gms-limit";
+    static final String GMS_HOOK_ID = "block-gms-limit";
+    static final String CHANNEL_HOOK_ID = "keep-alerting-channel";
+
+    private volatile ClassLoader systemServerClassLoader;
+    private volatile NotificationChannelKeeper channelKeeper;
 
     private final Hooker blocker = chain -> {
         log(Log.INFO, TAG, "blocked GreezeManagerService.triggerGMSLimitAction()");
         return null;
     };
 
-    private volatile ClassLoader systemServerClassLoader;
+    private final Hooker channelKeeperHooker = chain -> {
+        Object result = chain.proceed();
+        NotificationChannelKeeper keeper = channelKeeper;
+        if (keeper != null) {
+            try {
+                String kept = keeper.keepAlertingChannel(chain.getThisObject(), chain.getArg(0));
+                if (kept != null) {
+                    log(Log.INFO, TAG, "kept alerting channel for " + kept);
+                }
+            } catch (Throwable error) {
+                log(Log.WARN, TAG, "failed to keep alerting channel", error);
+            }
+        }
+        return result;
+    };
 
     @Override
     public void onSystemServerStarting(SystemServerStartingParam param) {
         systemServerClassLoader = param.getClassLoader();
-        try {
-            hook(resolveLimitMethod(systemServerClassLoader))
-                    .setId(HOOK_ID)
-                    .intercept(blocker);
-
-            log(Log.INFO, TAG,
-                    "hook installed in system_server; scope is limited to system");
-        } catch (Throwable error) {
-            log(Log.ERROR, TAG, "failed to install hook", error);
+        for (HookTarget target : resolveTargets(systemServerClassLoader)) {
+            try {
+                hook(target.method).setId(target.id).intercept(target.hooker);
+                log(Log.INFO, TAG, target.installedMessage);
+            } catch (Throwable error) {
+                log(Log.ERROR, TAG, "failed to install hook " + target.id, error);
+            }
         }
     }
 
@@ -55,42 +73,77 @@ public final class MainHook extends XposedModule {
             systemServerClassLoader = (ClassLoader) savedState;
         }
 
-        Method limitMethod = null;
-        try {
-            if (systemServerClassLoader == null) {
-                throw new IllegalStateException("system_server class loader was not handed over");
-            }
-            limitMethod = resolveLimitMethod(systemServerClassLoader);
-        } catch (Throwable error) {
-            log(Log.ERROR, TAG, "failed to resolve hook target after hot reload", error);
+        List<HookTarget> pending = new ArrayList<>();
+        if (systemServerClassLoader == null) {
+            log(Log.ERROR, TAG, "failed to resolve hook targets after hot reload",
+                    new IllegalStateException("system_server class loader was not handed over"));
+        } else {
+            pending.addAll(resolveTargets(systemServerClassLoader));
         }
 
-        boolean installed = false;
+        List<HookTarget> installed = new ArrayList<>();
         for (HookHandle handle : param.getOldHookHandles()) {
-            if (!installed && limitMethod != null && limitMethod.equals(handle.getExecutable())) {
+            HookTarget target = findTarget(pending, handle);
+            if (target != null) {
                 try {
-                    handle.replaceHook(blocker);
-                    installed = true;
+                    handle.replaceHook(target.hooker);
+                    pending.remove(target);
+                    installed.add(target);
                     continue;
                 } catch (Throwable error) {
-                    log(Log.WARN, TAG, "failed to replace old hook, reinstalling", error);
+                    log(Log.WARN, TAG, "failed to replace old hook " + target.id
+                            + ", reinstalling", error);
                 }
             }
             handle.unhook();
         }
 
-        if (!installed && limitMethod != null) {
+        for (HookTarget target : pending) {
             try {
-                hook(limitMethod).setId(HOOK_ID).intercept(blocker);
-                installed = true;
+                hook(target.method).setId(target.id).intercept(target.hooker);
+                installed.add(target);
             } catch (Throwable error) {
-                log(Log.ERROR, TAG, "failed to install hook after hot reload", error);
+                log(Log.ERROR, TAG, "failed to install hook " + target.id
+                        + " after hot reload", error);
             }
         }
 
-        if (installed) {
-            log(Log.INFO, TAG, "hook reinstalled in system_server after hot reload");
+        for (HookTarget target : installed) {
+            log(Log.INFO, TAG, "hook " + target.id + " reinstalled in system_server after hot reload");
         }
+    }
+
+    private List<HookTarget> resolveTargets(ClassLoader classLoader) {
+        List<HookTarget> targets = new ArrayList<>();
+        try {
+            targets.add(new HookTarget(GMS_HOOK_ID, resolveLimitMethod(classLoader), blocker,
+                    "hook installed in system_server; scope is limited to system"));
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "failed to resolve hook " + GMS_HOOK_ID, error);
+        }
+        try {
+            Class<?> recordClass = Class.forName(
+                    HookContract.NOTIFICATION_RECORD_CLASS,
+                    false,
+                    classLoader
+            );
+            Method copyRanking = HookContract.findCopyRankingMethod(recordClass);
+            channelKeeper = NotificationChannelKeeper.resolve(recordClass);
+            targets.add(new HookTarget(CHANNEL_HOOK_ID, copyRanking, channelKeeperHooker,
+                    "notification channel hook installed in system_server"));
+        } catch (Throwable error) {
+            log(Log.ERROR, TAG, "failed to resolve hook " + CHANNEL_HOOK_ID, error);
+        }
+        return targets;
+    }
+
+    private static HookTarget findTarget(List<HookTarget> targets, HookHandle handle) {
+        for (HookTarget target : targets) {
+            if (target.method.equals(handle.getExecutable())) {
+                return target;
+            }
+        }
+        return null;
     }
 
     private static Method resolveLimitMethod(ClassLoader classLoader) throws ReflectiveOperationException {
@@ -100,5 +153,19 @@ public final class MainHook extends XposedModule {
                 classLoader
         );
         return HookContract.findLimitMethod(serviceClass);
+    }
+
+    private static final class HookTarget {
+        final String id;
+        final Method method;
+        final Hooker hooker;
+        final String installedMessage;
+
+        HookTarget(String id, Method method, Hooker hooker, String installedMessage) {
+            this.id = id;
+            this.method = method;
+            this.hooker = hooker;
+            this.installedMessage = installedMessage;
+        }
     }
 }

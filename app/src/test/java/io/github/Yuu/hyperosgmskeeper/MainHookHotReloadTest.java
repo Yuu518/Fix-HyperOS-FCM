@@ -10,6 +10,7 @@ import static org.junit.Assert.assertTrue;
 
 import android.os.Bundle;
 
+import com.android.server.notification.NotificationRecord;
 import com.miui.server.greeze.GreezeManagerService;
 
 import java.lang.reflect.Executable;
@@ -20,6 +21,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import io.github.libxposed.api.XposedInterface;
+import io.github.libxposed.api.XposedInterface.Chain;
 import io.github.libxposed.api.XposedInterface.HookHandle;
 import io.github.libxposed.api.XposedInterface.Hooker;
 import io.github.libxposed.api.XposedModuleInterface.HotReloadedParam;
@@ -30,17 +32,30 @@ public final class MainHookHotReloadTest {
     private static final ClassLoader SYSTEM_SERVER = GreezeManagerService.class.getClassLoader();
 
     @Test
-    public void installsBlockingHookOnSystemServerStart() throws Throwable {
+    public void installsBothHooksOnSystemServerStart() throws Throwable {
         FakeFramework framework = new FakeFramework();
         MainHook module = framework.attach(new MainHook());
 
         module.onSystemServerStarting(() -> SYSTEM_SERVER);
 
-        assertEquals(1, framework.installed.size());
-        FakeHandle hook = framework.installed.get(0);
-        assertEquals(limitMethod(), hook.executable);
-        assertNotNull(hook.id);
-        assertNull(hook.hooker.intercept(null));
+        assertEquals(2, framework.installed.size());
+        FakeHandle gmsHook = framework.find(MainHook.GMS_HOOK_ID);
+        assertEquals(limitMethod(), gmsHook.executable);
+        assertNull(gmsHook.hooker.intercept(null));
+        assertEquals(copyRankingMethod(), framework.find(MainHook.CHANNEL_HOOK_ID).executable);
+    }
+
+    @Test
+    public void channelHookAlwaysProceeds() throws Throwable {
+        FakeFramework framework = new FakeFramework();
+        MainHook module = framework.attach(new MainHook());
+        module.onSystemServerStarting(() -> SYSTEM_SERVER);
+        FakeChain chain = new FakeChain(new NotificationRecord(), new NotificationRecord());
+
+        Object result = framework.find(MainHook.CHANNEL_HOOK_ID).hooker.intercept(chain.proxy());
+
+        assertTrue(chain.proceeded);
+        assertSame(FakeChain.PROCEED_RESULT, result);
     }
 
     @Test
@@ -54,36 +69,55 @@ public final class MainHookHotReloadTest {
     }
 
     @Test
-    public void hotReloadReplacesOldHookAndDropsOthers() throws Throwable {
+    public void hotReloadReplacesOldHooksAndDropsOthers() throws Throwable {
         FakeFramework oldFramework = new FakeFramework();
         MainHook oldModule = oldFramework.attach(new MainHook());
         oldModule.onSystemServerStarting(() -> SYSTEM_SERVER);
-        FakeHandle oldHook = oldFramework.installed.get(0);
+        FakeHandle oldGmsHook = oldFramework.find(MainHook.GMS_HOOK_ID);
+        FakeHandle oldChannelHook = oldFramework.find(MainHook.CHANNEL_HOOK_ID);
         FakeHandle strayHook = new FakeHandle(quickFreezeMethod(), null, chain -> null);
         Reloading reloading = new Reloading();
         oldModule.onHotReloading(reloading);
 
         FakeFramework newFramework = new FakeFramework();
         MainHook newModule = newFramework.attach(new MainHook());
-        newModule.onHotReloaded(new Reloaded(reloading.savedState, List.of(oldHook, strayHook)));
+        newModule.onHotReloaded(new Reloaded(reloading.savedState,
+                List.of(oldGmsHook, oldChannelHook, strayHook)));
 
-        assertNotNull(oldHook.replacement);
-        assertNotSame(oldHook.hooker, oldHook.replacement.hooker);
-        assertNull(oldHook.replacement.hooker.intercept(null));
-        assertFalse(oldHook.unhooked);
+        assertNotNull(oldGmsHook.replacement);
+        assertNotSame(oldGmsHook.hooker, oldGmsHook.replacement.hooker);
+        assertNull(oldGmsHook.replacement.hooker.intercept(null));
+        assertFalse(oldGmsHook.unhooked);
+        assertNotNull(oldChannelHook.replacement);
+        assertNotSame(oldChannelHook.hooker, oldChannelHook.replacement.hooker);
+        assertFalse(oldChannelHook.unhooked);
         assertTrue(strayHook.unhooked);
         assertTrue(newFramework.installed.isEmpty());
     }
 
     @Test
-    public void hotReloadInstallsHookWhenOldGenerationHadNone() throws Exception {
+    public void hotReloadInstallsHooksWhenOldGenerationHadNone() throws Exception {
         FakeFramework framework = new FakeFramework();
         MainHook module = framework.attach(new MainHook());
 
         module.onHotReloaded(new Reloaded(SYSTEM_SERVER, List.of()));
 
+        assertEquals(2, framework.installed.size());
+        assertEquals(limitMethod(), framework.find(MainHook.GMS_HOOK_ID).executable);
+        assertEquals(copyRankingMethod(), framework.find(MainHook.CHANNEL_HOOK_ID).executable);
+    }
+
+    @Test
+    public void hotReloadInstallsOnlyMissingHook() throws Exception {
+        FakeFramework framework = new FakeFramework();
+        MainHook module = framework.attach(new MainHook());
+        FakeHandle oldGmsHook = new FakeHandle(limitMethod(), MainHook.GMS_HOOK_ID, chain -> null);
+
+        module.onHotReloaded(new Reloaded(SYSTEM_SERVER, List.of(oldGmsHook)));
+
+        assertNotNull(oldGmsHook.replacement);
         assertEquals(1, framework.installed.size());
-        assertEquals(limitMethod(), framework.installed.get(0).executable);
+        assertEquals(copyRankingMethod(), framework.installed.get(0).executable);
     }
 
     @Test
@@ -109,12 +143,17 @@ public final class MainHookHotReloadTest {
         module.onHotReloaded(new Reloaded(SYSTEM_SERVER, List.of(oldHook)));
 
         assertTrue(oldHook.unhooked);
-        assertEquals(1, framework.installed.size());
-        assertEquals(limitMethod(), framework.installed.get(0).executable);
+        assertEquals(2, framework.installed.size());
+        assertEquals(limitMethod(), framework.find(MainHook.GMS_HOOK_ID).executable);
     }
 
     private static Method limitMethod() throws NoSuchMethodException {
         return GreezeManagerService.class.getDeclaredMethod("triggerGMSLimitAction");
+    }
+
+    private static Method copyRankingMethod() throws NoSuchMethodException {
+        return NotificationRecord.class.getDeclaredMethod(
+                "copyRankingInformation", NotificationRecord.class);
     }
 
     private static Method quickFreezeMethod() throws NoSuchMethodException {
@@ -133,6 +172,15 @@ public final class MainHookHotReloadTest {
             module.attachFramework(base, () -> {
             });
             return module;
+        }
+
+        FakeHandle find(String id) {
+            for (FakeHandle handle : installed) {
+                if (id.equals(handle.id)) {
+                    return handle;
+                }
+            }
+            throw new AssertionError("no hook installed with id " + id);
         }
 
         @Override
@@ -214,6 +262,41 @@ public final class MainHookHotReloadTest {
             }
             replacement = new FakeHandle(executable, id, hooker);
             return replacement;
+        }
+    }
+
+    private static final class FakeChain implements InvocationHandler {
+        static final Object PROCEED_RESULT = new Object();
+
+        private final Object thisObject;
+        private final Object previous;
+        boolean proceeded;
+
+        FakeChain(Object thisObject, Object previous) {
+            this.thisObject = thisObject;
+            this.previous = previous;
+        }
+
+        Chain proxy() {
+            return (Chain) Proxy.newProxyInstance(
+                    Chain.class.getClassLoader(),
+                    new Class<?>[]{Chain.class},
+                    this);
+        }
+
+        @Override
+        public Object invoke(Object proxy, Method method, Object[] args) {
+            switch (method.getName()) {
+                case "proceed":
+                    proceeded = true;
+                    return PROCEED_RESULT;
+                case "getThisObject":
+                    return thisObject;
+                case "getArg":
+                    return previous;
+                default:
+                    return null;
+            }
         }
     }
 

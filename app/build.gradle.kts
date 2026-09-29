@@ -6,7 +6,6 @@ val releaseStoreFile = providers.gradleProperty("RELEASE_STORE_FILE").orNull
 val releaseStorePassword = providers.gradleProperty("RELEASE_STORE_PASSWORD").orNull
 val releaseKeyAlias = providers.gradleProperty("RELEASE_KEY_ALIAS").orNull
 val releaseKeyPassword = providers.gradleProperty("RELEASE_KEY_PASSWORD").orNull
-val appVersionName = "1.1.0"
 val hasReleaseSigning = listOf(
     releaseStoreFile,
     releaseStorePassword,
@@ -15,15 +14,15 @@ val hasReleaseSigning = listOf(
 ).all { !it.isNullOrBlank() }
 
 android {
-    namespace = "io.github.Yuu.hyperosgmskeeper"
+    namespace = "io.github.Yuu518.hyperosgmskeeper"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "io.github.Yuu.hyperosgmskeeper"
+        applicationId = "io.github.Yuu518.hyperosgmskeeper"
         minSdk = 28
         targetSdk = 34
-        versionCode = 2
-        versionName = appVersionName
+        versionCode = 3
+        versionName = 0.3.0
     }
 
     signingConfigs {
