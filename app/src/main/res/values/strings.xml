@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Fix-HyperOS-FCM</string>
+    <string name="module_description">移除 HyperOS 国行对 FCM 推送的冻结与广播延迟限制</string>
+</resources>

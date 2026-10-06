@@ -1,0 +1,105 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GRADLE_VERSION: "9.8.0"
+  ANDROID_PLATFORM: "android-37.2"
+  ANDROID_BUILD_TOOLS: "37.0.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Resolve version
+        id: version
+        run: |
+          version="$(sed -nE 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' app/build.gradle.kts | head -n 1)"
+          if [[ -z "$version" ]]; then
+            echo "::error::Unable to read versionName from app/build.gradle.kts"
+            exit 1
+          fi
+          echo "name=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-disabled: true
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: "platforms;${{ env.ANDROID_PLATFORM }} build-tools;${{ env.ANDROID_BUILD_TOOLS }}"
+          log-accepted-android-sdk-licenses: false
+
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          for name in KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::Missing signing secret: $name"
+              exit 1
+            fi
+          done
+          keystore="$RUNNER_TEMP/fix-hyperos-fcm-signing.jks"
+          umask 077
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          echo "ANDROID_KEYSTORE_FILE=$keystore" >> "$GITHUB_ENV"
+
+      - name: Test and build release
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: >-
+          gradle --no-daemon --no-build-cache --stacktrace
+          :app:testReleaseUnitTest
+          :app:assembleRelease
+
+      - name: Verify signed APK
+        id: apk
+        run: |
+          apk="Fix-HyperOS-FCM-${{ steps.version.outputs.name }}.apk"
+          cp app/build/outputs/apk/release/app-release.apk "$apk"
+          "$ANDROID_HOME/build-tools/$ANDROID_BUILD_TOOLS/apksigner" verify --verbose --print-certs "$apk"
+          echo "path=$apk" >> "$GITHUB_OUTPUT"
+
+      - name: Upload release APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: Fix-HyperOS-FCM-${{ steps.version.outputs.name }}
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f -- "$RUNNER_TEMP/fix-hyperos-fcm-signing.jks"

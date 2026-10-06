@@ -1,0 +1,9 @@
+.gradle/
+.build-deps/
+**/build/
+local.properties
+*.jks
+*.keystore
+*.p12
+*.pfx
+.claude/
